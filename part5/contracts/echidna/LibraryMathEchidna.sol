@@ -1,99 +1,168 @@
+// SPDX-License-Identifier: GPL-3.0-only
 pragma solidity 0.8.6;
+
 import "../libraries/Reserve.sol";
 
-contract LibraryMathEchidna { 
-	Reserve.Data private reserve; // (0,0,0,0,0,0,0)
-	event LogUint256(string msg, uint256);
-	event AssertionFailed(string msg, uint256 expected, uint256 actualValue);
-	bool isSetup;
-	function setupReserve() private {
-		reserve.reserveRisky = 1 ether;
-		reserve.reserveStable = 2 ether;
-		reserve.liquidity = 3 ether;
-		isSetup = true;
-	}
-	//"safe"-version of reserve_allocate (1-uint128.max)
-	function reserve_allocate(uint256 delRisky, uint256 delStable) public returns (Reserve.Data memory preAllocateReserves, uint256 delLiquidity){
-		//************************* Pre-Conditions *************************/
-		//@note PRECONDITION: isSetup has to be true (0,0,...,0)
-		if (!isSetup) setupReserve();
-		//@note INVARIANT: delRisky, delStable need to be >0 
-		// | **1 - uint128**  | uint128-uint256 |
-		// @note INVARIANT: delta liquidity needs to be >0.
-		emit LogUint256("reserve.liquidity",reserve.liquidity);
-		emit LogUint256("reserve.reserveRisky",reserve.reserveRisky);
-        uint256 liquidity0 = (delRisky * reserve.liquidity) / uint256(reserve.reserveRisky); // calculate the risky token spot price 
+contract LibraryMathEchidna {
+    Reserve.Data private reserve = Reserve.Data(0, 0, 0, 0, 0, 0, 0);
+    bool isSetup;
+
+    // event LogReserve(Reserve.Data reserve);
+    event LogUint256(string text, uint256 value);
+    event AssertionFailed(string message, uint256 actual, uint256 expected);
+    event LogPreAndPostUint256(string text, uint256 pre, uint256 post);
+
+    function setupReserve() private {
+        reserve.reserveRisky = 1 ether;
+        reserve.reserveStable = 2 ether;
+        reserve.liquidity = 4 ether;
+        isSetup = true;
+    }
+
+    function safepath_reserve_allocate(
+        uint256 delRisky, // uint256 argument
+        uint256 delStable
+    ) public returns (Reserve.Data memory preAllocateReserves, uint256 delLiquidity) {
+        //************************* Pre-Conditions *************************/
+        // INVARIANT: isSetup has to be true(0,0,0,0,0,0,)
+        if (!isSetup) setupReserve();
+        // INVARIANT: delRisky, delStable need to be >0
+        delRisky = _between(delRisky, 1, type(uint128).max);
+        delStable = _between(delStable, 1, type(uint128).max);
+        uint256 liquidity0 = (delRisky * reserve.liquidity) / uint256(reserve.reserveRisky); // calculate the risky token spot price , @nat invariant reserve.reserveRisky > 0
         uint256 liquidity1 = (delStable * reserve.liquidity) / uint256(reserve.reserveStable); // calculate the stable token spot price
         delLiquidity = liquidity0 < liquidity1 ? liquidity0 : liquidity1; // min(risky,stable)
-		// snapshot the pool 
-		preAllocateReserves= reserve; 
+        // INVARIANT: delta liquidity needs to be >0.
+        // snapshot the pool
+        preAllocateReserves = reserve;
+        uint128 preReserveRisky = preAllocateReserves.reserveRisky;
+        uint128 preReserveStable = preAllocateReserves.reserveStable;
+        uint128 preReserveLiquidity = preAllocateReserves.liquidity;
+        //************************* Action *************************/
 
-		//************************* Action *************************/
-		uint256 liquidity0 = (delRisky * reserve.liquidity) / uint256(reserve.reserveRisky); // calculate the spot price on the risky token
-        	uint256 liquidity1 = (delStable * reserve.liquidity) / uint256(reserve.reserveStable); // calculate the spot price on the stable token
-        	delLiquidity = liquidity0 < liquidity1 ? liquidity0 : liquidity1; //choose min(risky spot, stable spot) for liquidity change
-		
-		Reserve.allocate(reserve,delRisky,delStable,delLiquidity,uint32(block.timestamp + 1000)); // allocate to the reserve
+        Reserve.allocate(reserve, delRisky, delStable, delLiquidity, uint32(block.timestamp + 1000)); //@note INVARIANT: increase reserves and liquidity amounts for the pool
 
-		//************************* Post-Conditions *************************/
-		// snapshot the pool  – "reserve" 
-		// pre-allocate reserve reserveRisky + amt risky added (delRisky) ==  post-allocate reserveRisky amount
-		assert(preAllocateReserves.reserveRisky + delRisky == reserve.reserveRisky);
-		// pre-allocate reserve reserveStable + amt stable added (delStable) ==  post-allocate reserveStable amount
-		assert(preAllocateReserves.reserveStable + delStable == reserve.reserveStable);
-		// pre-allocate reserve liquidity + delLiquidity (delLiquidity) ==  post-allocate liquidity
-		assert(preAllocateReserves.liquidity + delLiquidity == reserve.liquidity);
-	}
-	function reserve_remove(uint256 delLiquidity) public {
-		//************************* Pre-Conditions *************************/
-		if (!isSetup) {  
-			setupReserve(); // set up the reserve with starting value if it has not been started before
-		}	
-		Reserve.Data memory preRemoveReserves = reserve; // save the pre-remove reserve balances		
+        //************************* Post-Conditions *************************/
+        // reserveRisky should increase;
 
-		//************************* Action *************************/
-		(uint256 delRisky, uint256 delStable) = Reserve.getAmounts(reserve,delLiquidity); // calculate the amount of risky and stable tokens the incoming liquidity maps to 
-		
-		Reserve.remove(reserve,delRisky,delStable,delLiquidity,uint32(block.timestamp + 1000)); // call Reserve.remove
+        uint256 postReserveRisky = preReserveRisky + delRisky;
+        // reserveStable should increase
+        uint256 postReserveStable = preReserveStable + delStable;
+        // liquidity should increase
+        uint256 postLiquidity = preReserveLiquidity + delLiquidity;
 
-		//************************* Post-Conditions *************************/
-		// pre-remove risky balance = current reserve.reserveRisky + risky amount removed
-		assert(preRemoveReserves.reserveRisky == reserve.reserveRisky + delRisky);
-		// pre-remove stable balance = current reserve.reserveRisky + risky amount stable
-		assert(preRemoveReserves.reserveStable == reserve.reserveStable + delStable );
-		// pre-remove liquidity = current reserve.liquidity + deltaLiquidity
-		assert(preRemoveReserves.liquidity == reserve.liquidity + delLiquidity);		
-	}
+        assert(reserve.reserveRisky == postReserveRisky);
+        assert(reserve.reserveStable == postReserveStable);
+        assert(reserve.liquidity == postLiquidity);
+    }
 
-	function allocate_then_remove(uint256 delRisky, uint256 delStable) public {
-		//************************* Pre-Conditions *************************/
-		delRisky = _between(delRisky, 1, type(uint64).max); 
-		delStable = _between(delStable, 1, type(uint64).max); 
-		
-		emit LogUint256("delRisky", uint256(delRisky));
-		emit LogUint256("delStable", uint256(delStable));
+    function unSafepath_reserve_allocate(
+        uint256 delRisky, // uint256 argument
+        uint256 delStable
+    ) public returns (Reserve.Data memory preAllocateReserves, uint256 delLiquidity) {
+        //************************* Pre-Conditions *************************/
+        // INVARIANT: delRisky, delStable need to be >0
+        delRisky = _between(delRisky, 1, type(uint256).max);
+        delStable = _between(delStable, 1, type(uint256).max);
+        uint256 liquidity0 = (delRisky * reserve.liquidity) / uint256(reserve.reserveRisky); // calculate the risky token spot price , @nat invariant reserve.reserveRisky > 0
+        uint256 liquidity1 = (delStable * reserve.liquidity) / uint256(reserve.reserveStable); // calculate the stable token spot price
+        delLiquidity = liquidity0 < liquidity1 ? liquidity0 : liquidity1; // min(risky,stable)
+        // INVARIANT: delta liquidity needs to be >0.
+        // snapshot the pool
+        preAllocateReserves = reserve;
 
-		//************************* Action *************************/
-		// this gives us the snapshot of pre-allocate reserves, 
-		(Reserve.Data memory preAllocateReserves, uint256 delAllocateLiquidity) = 
-			reserve_allocate(delRisky, delStable); // this allocates to the pool, this ensures reserve balance increases
-		reserve_remove(delAllocateLiquidity); // this removes funds from the pool, ensures the balance decreases 
+        //************************* Action *************************/
 
-		//************************* Post-Conditions *************************/
-		// snapshot (pre-allocate).reserveRisky = current reserveRisky
-		if(preAllocateReserves.reserveRisky != reserve.reserveRisky) {
-			emit AssertionFailed("reserveRisky not equal",preAllocateReserves.reserveRisky,reserve.reserveRisky);
-		}
-		// pre-allocate reserveStable = current (post-remove) reserveStable 
-		if(preAllocateReserves.reserveStable  != reserve.reserveStable) {
-			emit AssertionFailed("preallocate stable not equivalent to current stable", preAllocateReserves.reserveStable, reserve.reserveStable);
-		}
-		// pre-allocate liquidity = current (post-remove) liquidity
-		if(preAllocateReserves.liquidity  != reserve.liquidity) {
-			emit AssertionFailed("preallocate liq not equivalent to current liq", preAllocateReserves.liquidity, reserve.liquidity);
-		}
-	}
-	function _between(uint256 random, uint256 low, uint256 high) private returns (uint256) {
-		return low + random % (high-low);
-	}
+        Reserve.allocate(reserve, delRisky, delStable, delLiquidity, uint32(block.timestamp + 1000)); //@note INVARIANT: increase reserves and liquidity amounts for the pool
+
+        //************************* Post-Conditions *************************/
+        // reserveRisky should increase;
+
+        assert(reserve.reserveRisky == preAllocateReserves.reserveRisky + delRisky);
+        assert(reserve.reserveStable == preAllocateReserves.reserveStable + delStable);
+        assert(reserve.liquidity == preAllocateReserves.liquidity + delLiquidity);
+    }
+
+    function reserve_remove(uint256 delLiquidity)
+        public
+        returns (Reserve.Data memory postAllocateReserves, uint256 delRisky, uint256 delStable)
+    {
+        //************************* Pre-Conditions *************************/
+        // INVARIANT: isSetup has to be true , since the reserve should have funds
+        if (!isSetup) setupReserve();
+        //@note INVARIANT: the change in liquidity must be > 0
+        // calculates the amount of risky and stable in exchange for liquidity
+
+        // snapshot the pool
+        Reserve.Data memory postAllocateReserves = reserve;
+        // delLiquidity = _between(delLiquidity, 1, uint128(reserve.liquidity));
+        delLiquidity = _between(delLiquidity, 1, type(uint128).max);
+        (delRisky, delStable) = Reserve.getAmounts(reserve, delLiquidity);
+        // decrease the amount of liquidity associated to a pool
+        //@note INVARIANT: risky, stable, liquidity amounts for a pool should decrease by respective amounts
+        //@note INVARIANT: margins for the msg.sender should increase
+        //************************* Action *************************/
+        Reserve.remove(reserve, delRisky, delStable, delLiquidity, uint32(block.timestamp + 1000));
+        //************************* Post-Conditions *************************/
+        //@note INVARIANT: the change in liquidity must be > 0
+
+        assert(reserve.reserveRisky == postAllocateReserves.reserveRisky - delRisky);
+        assert(reserve.reserveStable == postAllocateReserves.reserveStable - delStable);
+        assert(reserve.liquidity == postAllocateReserves.liquidity - delLiquidity);
+        //@note INVARIANT: risky, stable, liquidity amounts for a pool should decrease by respective amounts
+        //@note INVARIANT: margins for the msg.sender should increase
+    }
+
+    function allocate_then_remove(
+        uint256 delRisky, // uint256 argument
+        uint256 delStable
+    ) public {
+        //************************* Pre-Conditions************************ */
+        // the input bound will be checked in the saafepath_reserve_allocate
+        //************************* Actions*************************/
+        (Reserve.Data memory preAllocateReserves, uint256 delAllocateLiquidity) =
+            safepath_reserve_allocate(delRisky, delStable);
+        (Reserve.Data memory postAllocateReserves, uint256 delRiskyPostRemove, uint256 delStablePostRemove) =
+            reserve_remove(delAllocateLiquidity);
+
+        //************************* Post-Conditions*************************/
+        //  snapshot1 ( postRemove (allocating and removing) ie current reserve state) state changes should be the same as preAllocate state
+        Reserve.Data memory postAllocateAndRemoveReserves = reserve;
+
+        emit LogPreAndPostUint256("liquidity", preAllocateReserves.liquidity, postAllocateAndRemoveReserves.liquidity);
+        emit LogPreAndPostUint256(
+            "reserveStable", preAllocateReserves.reserveStable, postAllocateAndRemoveReserves.reserveStable
+        );
+        emit LogPreAndPostUint256(
+            "reserveRisky", preAllocateReserves.reserveRisky, postAllocateAndRemoveReserves.reserveRisky
+        );
+
+        if (preAllocateReserves.liquidity != postAllocateAndRemoveReserves.liquidity) {
+            emit AssertionFailed(
+                "preAllocateReserves.liquidity != postAllocateAndRemoveReserves.liquidity",
+                preAllocateReserves.liquidity,
+                postAllocateAndRemoveReserves.liquidity
+            );
+        }
+
+        if (preAllocateReserves.reserveStable != postAllocateAndRemoveReserves.reserveStable) {
+            emit AssertionFailed(
+                "preAllocateReserves.reserveStable == postAllocateAndRemoveReserves.reserveStable",
+                preAllocateReserves.reserveStable,
+                postAllocateAndRemoveReserves.reserveStable
+            );
+        }
+
+        if (preAllocateReserves.reserveRisky != postAllocateAndRemoveReserves.reserveRisky) {
+            emit AssertionFailed(
+                "preAllocateReserves.reserveRisky != postAllocateAndRemoveReserves.reserveRisky",
+                preAllocateReserves.reserveRisky,
+                postAllocateAndRemoveReserves.reserveRisky
+            );
+        }
+    }
+
+    function _between(uint256 random, uint256 low, uint256 high) private pure returns (uint256) {
+        return low + random % (high - low);
+    }
 }
